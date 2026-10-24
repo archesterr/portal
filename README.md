@@ -14,7 +14,7 @@ docker compose up -d --build
 docker compose logs -f                    # SMS_PROVIDER=console prints OTPs here
 ```
 
-Origin nginx behind Arvan CDN (TLS on Arvan, origin :8880, Arvan-only allowlist): `deploy/nginx.conf` + `deploy/arvan-ips.sh`. Backups: `deploy/backup.sh` in cron.
+Origin nginx behind Arvan CDN (TLS on Arvan, origin HTTPS :8880, Arvan-only allowlist): `deploy/nginx.conf` + `deploy/arvan-ips.sh`. Backups: `deploy/backup.sh` in cron.
 
 Log in with a number listed in `ADMIN_PHONES` → lands on `/admin`.
 
