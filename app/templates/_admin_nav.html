@@ -1,0 +1,9 @@
+<div class="stats">
+  <div><b>{{ stats.users | fa }}</b><span>مشتری</span></div>
+  <div><b>{{ stats.active | fa }}</b><span>سرویس فعال</span></div>
+  <div><b>{{ stats.revenue | fa }}</b><span>تومان فروش</span></div>
+</div>
+<nav class="tabs main">
+  <a href="/admin" class="{{ 'on' if tab == 'orders' }}">درخواست‌ها</a>
+  <a href="/admin/customers" class="{{ 'on' if tab == 'customers' }}">مشتریان</a>
+</nav>

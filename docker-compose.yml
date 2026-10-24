@@ -4,6 +4,8 @@ services:
     image: portal:latest
     restart: unless-stopped
     env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # reach a panel running on this same host
     ports:
       - "127.0.0.1:8000:8000"     # nginx in front terminates TLS
     volumes:

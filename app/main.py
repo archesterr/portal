@@ -326,22 +326,43 @@ def admin_logout(req: Request):
     raise Redirect("/admin/login")
 
 
+ORDER_TABS = ("pending", "approved", "rejected", "all")
+PAGE = 50
+
+
+def back_to(tab):
+    return f"/admin?status={tab}" if tab in ORDER_TABS else "/admin"
+
+
 @app.get("/admin")
-def admin_home(req: Request):
+def admin_home(req: Request, status: str = "pending", page: int = 1):
     need_admin(req)
+    status = status if status in ORDER_TABS else "pending"
+    page = max(1, page)
+    where, args = ("", ()) if status == "all" else ("WHERE o.status=?", (status,))
+    order_by = "o.id ASC" if status == "pending" else "o.id DESC"
     with db.conn() as c:
-        pending = c.execute("SELECT o.*, u.name, u.phone, u.email, s.status AS svc FROM orders o "
-                            "JOIN users u ON u.id=o.user_id LEFT JOIN services s ON s.user_id=o.user_id "
-                            "WHERE o.status='pending' ORDER BY o.id").fetchall()
-        recent = c.execute("SELECT o.*, u.name, u.phone FROM orders o JOIN users u ON u.id=o.user_id "
-                           "WHERE o.status!='pending' ORDER BY o.decided_at DESC LIMIT 30").fetchall()
-        customers = c.execute("SELECT u.*, s.total_gb, s.status AS svc, s.sub_id FROM users u "
-                              "LEFT JOIN services s ON s.user_id=u.id ORDER BY u.id DESC LIMIT 300").fetchall()
+        counts = {r["status"]: r["n"] for r in c.execute("SELECT status, COUNT(*) n FROM orders GROUP BY status")}
+        counts["all"] = sum(counts.values())
+        orders = c.execute(
+            "SELECT o.*, u.name, u.phone, u.email, s.status AS svc FROM orders o "
+            "JOIN users u ON u.id=o.user_id LEFT JOIN services s ON s.user_id=o.user_id "
+            f"{where} ORDER BY {order_by} LIMIT ? OFFSET ?", (*args, PAGE + 1, (page - 1) * PAGE)).fetchall()
         stats = c.execute("SELECT (SELECT COUNT(*) FROM users) users, "
                           "(SELECT COUNT(*) FROM services WHERE status='active') active, "
                           "(SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='approved') revenue").fetchone()
-    return render(req, "admin.html", user=None, pending=pending, recent=recent,
-                  customers=customers, stats=stats, sub_base=SUB_BASE)
+    return render(req, "admin.html", user=None, orders=orders[:PAGE], has_next=len(orders) > PAGE,
+                  page=page, status=status, counts=counts, stats=stats, tab="orders")
+
+
+@app.get("/admin/customers")
+def admin_customers(req: Request):
+    need_admin(req)
+    with db.conn() as c:
+        customers = c.execute("SELECT u.*, s.total_gb, s.status AS svc, s.sub_id, "
+                              "(SELECT COUNT(*) FROM orders o WHERE o.user_id=u.id AND o.status='approved') paid "
+                              "FROM users u LEFT JOIN services s ON s.user_id=u.id ORDER BY u.id DESC").fetchall()
+    return render(req, "admin_customers.html", user=None, customers=customers, sub_base=SUB_BASE, tab="customers")
 
 
 @app.get("/admin/receipt/{name}")
@@ -353,17 +374,19 @@ def admin_receipt(req: Request, name: str):
 
 
 @app.post("/admin/order/{oid}")
-def admin_order(req: Request, oid: int, action: str = Form(...), note: str = Form("")):
+def admin_order(req: Request, oid: int, action: str = Form(...), note: str = Form(""), back: str = Form("pending")):
     need_admin(req)
+    dest = back_to(back)
     with db.conn() as c:
-        o = c.execute("SELECT * FROM orders WHERE id=? AND status='pending'", (oid,)).fetchone()
-    if not o:
-        fail(req, "سفارش پیدا نشد یا قبلاً بررسی شده.", "/admin")
+        o = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+    allowed = {"approve": ("pending", "rejected"), "reject": ("pending",)}
+    if not o or o["status"] not in allowed.get(action, ()):
+        fail(req, "این سفارش قابل تغییر نیست (قبلاً بررسی شده).", dest)
     if action == "approve":
         try:
             deliver(o)
         except PanelError as e:
-            fail(req, f"ارسال به پنل ناموفق: {e}", "/admin")
+            fail(req, f"ارسال به پنل ناموفق: {e}", dest)
         status = "approved"
         flash(req, f"سفارش #{oid} تأیید شد و {o['gb']} KG اضافه شد.")
     elif action == "reject":
@@ -375,7 +398,7 @@ def admin_order(req: Request, oid: int, action: str = Form(...), note: str = For
         c.execute("UPDATE orders SET status=?, note=?, decided_at=? WHERE id=?",
                   (status, note.strip()[:200] or None, int(time.time()), oid))
     audit("admin", f"order_{status}", oid)
-    raise Redirect("/admin")
+    raise Redirect(dest)
 
 
 @app.post("/admin/user/{uid}/revoke")
@@ -387,12 +410,12 @@ def admin_revoke(req: Request, uid: int):
         try:
             panel.remove(json.loads(s["clients"]))
         except PanelError as e:
-            fail(req, f"غیرفعال‌سازی ناموفق: {e}", "/admin")
+            fail(req, f"غیرفعال‌سازی ناموفق: {e}", "/admin/customers")
         with db.conn() as c:
             c.execute("UPDATE services SET status='revoked' WHERE user_id=?", (uid,))
         audit("admin", "revoke", uid)
         flash(req, "سرویس غیرفعال شد.")
-    raise Redirect("/admin")
+    raise Redirect("/admin/customers")
 
 
 @app.post("/admin/user/{uid}/reset")
@@ -404,4 +427,4 @@ def admin_reset(req: Request, uid: int):
     if n:
         audit("admin", "reset_pw", uid)
         flash(req, f"رمز جدید کاربر #{uid}: {pw}")
-    raise Redirect("/admin")
+    raise Redirect("/admin/customers")

@@ -1,73 +1,62 @@
 {% extends "base.html" %}
-{% set st = {"approved": ("تأیید", "ok"), "rejected": ("رد", "err")} %}
+{% set labels = {"pending": "در انتظار", "approved": "تأیید شده", "rejected": "رد شده", "all": "همه"} %}
+{% set badge = {"pending": "warn", "approved": "ok", "rejected": "err"} %}
 {% block body %}
+{% include "_admin_nav.html" %}
 
-<div class="stats">
-  <div><b>{{ stats.users | fa }}</b><span>مشتری</span></div>
-  <div><b>{{ stats.active | fa }}</b><span>سرویس فعال</span></div>
-  <div><b>{{ stats.revenue | fa }}</b><span>تومان فروش</span></div>
-</div>
+<nav class="tabs">
+  {% for t in ("pending", "approved", "rejected", "all") %}
+  <a href="/admin?status={{ t }}" class="{{ 'on' if status == t }}">{{ labels[t] }} <span class="n">{{ (counts.get(t) or 0) | fa }}</span></a>
+  {% endfor %}
+</nav>
 
-<section class="card">
-  <h2>سفارش‌های در انتظار <span class="badge warn">{{ pending | length | fa }}</span></h2>
-  {% for o in pending %}
-  <div class="item">
-    <div class="row">
-      <b>#{{ o.id }} · {{ o.gb | fa }} KG · {{ o.amount | fa }} تومان</b>
-      <span class="badge {{ 'ok' if o.svc == 'active' else 'mute' }}">{{ "افزایش حجم" if o.svc == 'active' else "سرویس جدید" }}</span>
+{% for o in orders %}
+<section class="card req {{ o.status }}">
+  <div class="row">
+    <b class="amt">{{ o.gb | fa }} KG <span class="muted">· {{ o.amount | fa }} تومان</span></b>
+    <span class="badge {{ badge[o.status] }}">{{ labels[o.status] }}</span>
+  </div>
+  <div class="who">
+    <b>{{ o.name }}</b>
+    <a href="tel:{{ o.phone }}" dir="ltr">{{ o.phone }}</a>
+    {% if o.email %}<span dir="ltr" class="muted">{{ o.email }}</span>{% endif %}
+  </div>
+  <div class="small muted">
+    سفارش #{{ o.id | fa }} ·
+    {% if o.status == 'pending' %}{{ "افزایش حجم سرویس فعلی" if o.svc == 'active' else "سرویس جدید" }}{% endif %}
+    {% if o.note %} · {{ o.note }}{% endif %}
+  </div>
+
+  <a class="receipt" href="/admin/receipt/{{ o.receipt }}" target="_blank" rel="noopener">
+    {% if o.receipt.endswith('.pdf') %}<span class="pdf">📄 رسید (PDF) — باز کردن</span>
+    {% else %}<img src="/admin/receipt/{{ o.receipt }}" alt="رسید" loading="lazy">{% endif %}
+  </a>
+
+  {% if o.status == 'pending' %}
+  <form method="post" action="/admin/order/{{ o.id }}" class="decide">
+    <input type="hidden" name="back" value="{{ status }}">
+    <input name="note" placeholder="دلیل رد (به مشتری نمایش داده می‌شود)" maxlength="200">
+    <div class="two">
+      <button class="btn" name="action" value="approve">✓ تأیید</button>
+      <button class="btn danger" name="action" value="reject">✕ رد</button>
     </div>
-    <div class="small">{{ o.name }} · <span dir="ltr">{{ o.phone }}</span>{% if o.email %} · <span dir="ltr">{{ o.email }}</span>{% endif %}</div>
-    <a class="receipt" href="/admin/receipt/{{ o.receipt }}" target="_blank" rel="noopener">
-      {% if o.receipt.endswith('.pdf') %}📄 مشاهده رسید (PDF){% else %}<img src="/admin/receipt/{{ o.receipt }}" alt="رسید">{% endif %}
-    </a>
-    <form method="post" action="/admin/order/{{ o.id }}" class="actions">
-      <input name="note" placeholder="توضیح (در صورت رد)" maxlength="200">
-      <button class="btn sm" name="action" value="approve">تأیید و ارسال</button>
-      <button class="btn sm danger" name="action" value="reject">رد</button>
-    </form>
-  </div>
-  {% else %}<p class="muted">موردی نیست.</p>{% endfor %}
+  </form>
+  {% elif o.status == 'rejected' %}
+  <form method="post" action="/admin/order/{{ o.id }}" data-confirm="سفارش #{{ o.id }} تأیید و {{ o.gb }} KG ارسال شود؟">
+    <input type="hidden" name="back" value="{{ status }}">
+    <button class="btn sm ghost" name="action" value="approve">تأیید (اشتباه رد شده بود)</button>
+  </form>
+  {% endif %}
 </section>
+{% else %}
+<section class="card"><p class="muted center">{{ "درخواست جدیدی نیست 🎉" if status == 'pending' else "موردی نیست." }}</p></section>
+{% endfor %}
 
-<section class="card">
-  <h2>مشتریان</h2>
-  <div class="tablewrap">
-  <table>
-    <thead><tr><th>مشتری</th><th>حجم</th><th></th></tr></thead>
-    <tbody>
-    {% for c in customers %}
-      <tr>
-        <td><div>{{ c.name }} <span class="muted small">#{{ c.id }}</span></div>
-            <div class="small muted" dir="ltr">{{ c.phone }}{% if c.email %} · {{ c.email }}{% endif %}</div></td>
-        <td class="small">{% if c.svc == 'active' %}{{ c.total_gb | fa }} KG{% elif c.svc %}<span class="muted">غیرفعال</span>{% else %}<span class="muted">—</span>{% endif %}</td>
-        <td class="btns">
-          {% if c.svc == 'active' %}
-          <button class="btn sm ghost" type="button" data-copy="{{ sub_base }}/{{ c.sub_id }}">لینک</button>
-          <form method="post" action="/admin/user/{{ c.id }}/revoke" data-confirm="سرویس {{ c.name }} غیرفعال شود؟">
-            <button class="btn sm danger">غیرفعال</button>
-          </form>
-          {% endif %}
-          <form method="post" action="/admin/user/{{ c.id }}/reset" data-confirm="رمز {{ c.name }} عوض شود؟">
-            <button class="btn sm ghost">رمز جدید</button>
-          </form>
-        </td>
-      </tr>
-    {% else %}<tr><td colspan="3" class="muted">هنوز مشتری ندارید.</td></tr>{% endfor %}
-    </tbody>
-  </table>
-  </div>
-</section>
-
-<section class="card">
-  <h2>آخرین سفارش‌های بررسی‌شده</h2>
-  {% for o in recent %}
-  <div class="order">
-    <div><b>#{{ o.id }} · {{ o.gb | fa }} KG</b> <span class="small muted">— {{ o.name }}</span>
-      {% if o.note %}<div class="small muted">{{ o.note }}</div>{% endif %}</div>
-    <a class="small" href="/admin/receipt/{{ o.receipt }}" target="_blank" rel="noopener">رسید</a>
-    <span class="badge {{ st[o.status][1] }}">{{ st[o.status][0] }}</span>
-  </div>
-  {% else %}<p class="muted">موردی نیست.</p>{% endfor %}
-</section>
-
+{% if page > 1 or has_next %}
+<nav class="pager">
+  {% if page > 1 %}<a class="btn sm ghost" href="/admin?status={{ status }}&page={{ page - 1 }}">قبلی</a>{% endif %}
+  <span class="muted small">صفحه {{ page | fa }}</span>
+  {% if has_next %}<a class="btn sm ghost" href="/admin?status={{ status }}&page={{ page + 1 }}">بعدی</a>{% endif %}
+</nav>
+{% endif %}
 {% endblock %}
