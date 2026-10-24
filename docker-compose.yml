@@ -4,9 +4,9 @@ services:
     image: portal:latest
     restart: unless-stopped
     env_file: .env
-    extra_hosts:
-      - "host.docker.internal:host-gateway"   # reach a panel running on this same host
-    ports:
-      - "127.0.0.1:8000:8000"     # nginx in front terminates TLS
+    # same host as the panel: reach it on 127.0.0.1; app itself binds loopback only (nginx in front)
+    network_mode: host
+    command: ["uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000",
+              "--proxy-headers", "--forwarded-allow-ips=127.0.0.1", "--no-server-header", "--workers", "1"]
     volumes:
       - ./data:/data
