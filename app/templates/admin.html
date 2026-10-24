@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block body %}
+
+<div class="stats">
+  <div><b>{{ stats.users }}</b><span>کاربر</span></div>
+  <div><b>{{ stats.verified }}</b><span>احراز شده</span></div>
+  <div><b>{{ stats.active }}</b><span>سرویس فعال</span></div>
+</div>
+
+<section class="card">
+  <h2>احراز هویت در انتظار <span class="badge warn">{{ kycs|length }}</span></h2>
+  {% for u in kycs %}
+  <div class="item">
+    <div class="row"><b>{{ u.full_name }}</b><span dir="ltr" class="small">{{ u.phone }}</span></div>
+    <div class="small muted">کد ملی: <span dir="ltr">{{ u.national_code }}</span></div>
+    <div class="docs">
+      {% for f in (u.id_doc, u.selfie) if f %}
+      <a href="/admin/file/{{ f }}" target="_blank" rel="noopener"><img src="/admin/file/{{ f }}" alt=""></a>
+      {% endfor %}
+    </div>
+    <form method="post" action="/admin/kyc/{{ u.id }}" class="actions">
+      <input name="note" placeholder="توضیح (در صورت رد)" maxlength="200">
+      <button class="btn sm" name="action" value="approve">تأیید</button>
+      <button class="btn sm danger" name="action" value="reject">رد</button>
+    </form>
+  </div>
+  {% else %}<p class="muted">موردی نیست.</p>{% endfor %}
+</section>
+
+<section class="card">
+  <h2>درخواست‌های در انتظار <span class="badge warn">{{ pending|length }}</span></h2>
+  {% for r in pending %}
+  <div class="item">
+    <div class="row"><b>#{{ r.id }} · {{ plan_title(r.plan_id) }}</b><span dir="ltr" class="small">{{ r.phone }}</span></div>
+    <div class="small muted">{{ r.full_name }}</div>
+    <form method="post" action="/admin/request/{{ r.id }}" class="actions">
+      <input name="note" placeholder="توضیح (در صورت رد)" maxlength="200">
+      <button class="btn sm" name="action" value="approve">فعال‌سازی</button>
+      <button class="btn sm danger" name="action" value="reject">رد</button>
+    </form>
+  </div>
+  {% else %}<p class="muted">موردی نیست.</p>{% endfor %}
+</section>
+
+<section class="card">
+  <h2>سرویس‌های فعال</h2>
+  <table>
+    <thead><tr><th>#</th><th>کاربر</th><th>سرویس</th><th></th></tr></thead>
+    <tbody>
+    {% for r in active %}
+      <tr>
+        <td>{{ r.id }}</td>
+        <td><div>{{ r.full_name }}</div><div class="small muted" dir="ltr">{{ r.phone }}</div></td>
+        <td class="small">{{ plan_title(r.plan_id) }}<div class="muted" dir="ltr">{{ r.sub_id }}</div></td>
+        <td>
+          <form method="post" action="/admin/request/{{ r.id }}" data-confirm="سرویس #{{ r.id }} غیرفعال شود؟">
+            <button class="btn sm danger" name="action" value="revoke">غیرفعال</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}<tr><td colspan="4" class="muted">موردی نیست.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
+
+{% endblock %}

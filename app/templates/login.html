@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block body %}
+<section class="card narrow">
+  <h1>ورود</h1>
+  <p class="muted">شماره موبایل خود را وارد کنید تا کد تأیید برایتان پیامک شود.</p>
+  <form method="post" action="/login" class="stack">
+    <label>شماره موبایل
+      <input name="phone" type="tel" inputmode="numeric" autocomplete="tel" placeholder="09xxxxxxxxx" dir="ltr" required autofocus>
+    </label>
+    <button class="btn" type="submit">دریافت کد</button>
+  </form>
+</section>
+{% endblock %}
