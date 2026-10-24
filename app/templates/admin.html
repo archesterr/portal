@@ -1,26 +1,28 @@
 {% extends "base.html" %}
+{% set st = {"approved": ("تأیید", "ok"), "rejected": ("رد", "err")} %}
 {% block body %}
 
 <div class="stats">
-  <div><b>{{ stats.users }}</b><span>کاربر</span></div>
-  <div><b>{{ stats.verified }}</b><span>احراز شده</span></div>
-  <div><b>{{ stats.active }}</b><span>سرویس فعال</span></div>
+  <div><b>{{ stats.users | fa }}</b><span>مشتری</span></div>
+  <div><b>{{ stats.active | fa }}</b><span>سرویس فعال</span></div>
+  <div><b>{{ stats.revenue | fa }}</b><span>تومان فروش</span></div>
 </div>
 
 <section class="card">
-  <h2>احراز هویت در انتظار <span class="badge warn">{{ kycs|length }}</span></h2>
-  {% for u in kycs %}
+  <h2>سفارش‌های در انتظار <span class="badge warn">{{ pending | length | fa }}</span></h2>
+  {% for o in pending %}
   <div class="item">
-    <div class="row"><b>{{ u.full_name }}</b><span dir="ltr" class="small">{{ u.phone }}</span></div>
-    <div class="small muted">کد ملی: <span dir="ltr">{{ u.national_code }}</span></div>
-    <div class="docs">
-      {% for f in (u.id_doc, u.selfie) if f %}
-      <a href="/admin/file/{{ f }}" target="_blank" rel="noopener"><img src="/admin/file/{{ f }}" alt=""></a>
-      {% endfor %}
+    <div class="row">
+      <b>#{{ o.id }} · {{ o.gb | fa }} KG · {{ o.amount | fa }} تومان</b>
+      <span class="badge {{ 'ok' if o.svc == 'active' else 'mute' }}">{{ "افزایش حجم" if o.svc == 'active' else "سرویس جدید" }}</span>
     </div>
-    <form method="post" action="/admin/kyc/{{ u.id }}" class="actions">
+    <div class="small">{{ o.name }} · <span dir="ltr">{{ o.phone }}</span>{% if o.email %} · <span dir="ltr">{{ o.email }}</span>{% endif %}</div>
+    <a class="receipt" href="/admin/receipt/{{ o.receipt }}" target="_blank" rel="noopener">
+      {% if o.receipt.endswith('.pdf') %}📄 مشاهده رسید (PDF){% else %}<img src="/admin/receipt/{{ o.receipt }}" alt="رسید">{% endif %}
+    </a>
+    <form method="post" action="/admin/order/{{ o.id }}" class="actions">
       <input name="note" placeholder="توضیح (در صورت رد)" maxlength="200">
-      <button class="btn sm" name="action" value="approve">تأیید</button>
+      <button class="btn sm" name="action" value="approve">تأیید و ارسال</button>
       <button class="btn sm danger" name="action" value="reject">رد</button>
     </form>
   </div>
@@ -28,39 +30,44 @@
 </section>
 
 <section class="card">
-  <h2>درخواست‌های در انتظار <span class="badge warn">{{ pending|length }}</span></h2>
-  {% for r in pending %}
-  <div class="item">
-    <div class="row"><b>#{{ r.id }} · {{ plan_title(r.plan_id) }}</b><span dir="ltr" class="small">{{ r.phone }}</span></div>
-    <div class="small muted">{{ r.full_name }}</div>
-    <form method="post" action="/admin/request/{{ r.id }}" class="actions">
-      <input name="note" placeholder="توضیح (در صورت رد)" maxlength="200">
-      <button class="btn sm" name="action" value="approve">فعال‌سازی</button>
-      <button class="btn sm danger" name="action" value="reject">رد</button>
-    </form>
-  </div>
-  {% else %}<p class="muted">موردی نیست.</p>{% endfor %}
-</section>
-
-<section class="card">
-  <h2>سرویس‌های فعال</h2>
+  <h2>مشتریان</h2>
+  <div class="tablewrap">
   <table>
-    <thead><tr><th>#</th><th>کاربر</th><th>سرویس</th><th></th></tr></thead>
+    <thead><tr><th>مشتری</th><th>حجم</th><th></th></tr></thead>
     <tbody>
-    {% for r in active %}
+    {% for c in customers %}
       <tr>
-        <td>{{ r.id }}</td>
-        <td><div>{{ r.full_name }}</div><div class="small muted" dir="ltr">{{ r.phone }}</div></td>
-        <td class="small">{{ plan_title(r.plan_id) }}<div class="muted" dir="ltr">{{ r.sub_id }}</div></td>
-        <td>
-          <form method="post" action="/admin/request/{{ r.id }}" data-confirm="سرویس #{{ r.id }} غیرفعال شود؟">
-            <button class="btn sm danger" name="action" value="revoke">غیرفعال</button>
+        <td><div>{{ c.name }} <span class="muted small">#{{ c.id }}</span></div>
+            <div class="small muted" dir="ltr">{{ c.phone }}{% if c.email %} · {{ c.email }}{% endif %}</div></td>
+        <td class="small">{% if c.svc == 'active' %}{{ c.total_gb | fa }} KG{% elif c.svc %}<span class="muted">غیرفعال</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td class="btns">
+          {% if c.svc == 'active' %}
+          <button class="btn sm ghost" type="button" data-copy="{{ sub_base }}/{{ c.sub_id }}">لینک</button>
+          <form method="post" action="/admin/user/{{ c.id }}/revoke" data-confirm="سرویس {{ c.name }} غیرفعال شود؟">
+            <button class="btn sm danger">غیرفعال</button>
+          </form>
+          {% endif %}
+          <form method="post" action="/admin/user/{{ c.id }}/reset" data-confirm="رمز {{ c.name }} عوض شود؟">
+            <button class="btn sm ghost">رمز جدید</button>
           </form>
         </td>
       </tr>
-    {% else %}<tr><td colspan="4" class="muted">موردی نیست.</td></tr>{% endfor %}
+    {% else %}<tr><td colspan="3" class="muted">هنوز مشتری ندارید.</td></tr>{% endfor %}
     </tbody>
   </table>
+  </div>
+</section>
+
+<section class="card">
+  <h2>آخرین سفارش‌های بررسی‌شده</h2>
+  {% for o in recent %}
+  <div class="order">
+    <div><b>#{{ o.id }} · {{ o.gb | fa }} KG</b> <span class="small muted">— {{ o.name }}</span>
+      {% if o.note %}<div class="small muted">{{ o.note }}</div>{% endif %}</div>
+    <a class="small" href="/admin/receipt/{{ o.receipt }}" target="_blank" rel="noopener">رسید</a>
+    <span class="badge {{ st[o.status][1] }}">{{ st[o.status][0] }}</span>
+  </div>
+  {% else %}<p class="muted">موردی نیست.</p>{% endfor %}
 </section>
 
 {% endblock %}

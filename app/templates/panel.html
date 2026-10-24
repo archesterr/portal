@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% set st = {"pending": ("در انتظار تأیید", "warn"), "approved": ("تأیید شد", "ok"), "rejected": ("رد شد", "err")} %}
+{% block body %}
+
+<p class="hello">سلام {{ user.name }} 👋</p>
+
+{# ---------- my service ---------- #}
+{% if service %}
+<section class="card svc">
+  <div class="row"><h2>سرویس من</h2><span class="badge ok">فعال</span></div>
+  {% if service.used is not none %}
+    <div class="meter">
+      <div class="big">{{ service.left }} <small>KG باقی‌مانده</small></div>
+      <progress max="100" value="{{ service.pct }}"></progress>
+      <div class="row small muted"><span>مصرف: {{ service.used }} KG</span><span>کل: {{ service.total }} KG</span></div>
+    </div>
+  {% else %}
+    <div class="meter"><div class="big">{{ service.total }} <small>KG</small></div></div>
+  {% endif %}
+  <p class="muted small">این لینک را در برنامه خود وارد کنید یا کد را اسکن کنید.</p>
+  <div class="linkbox"><code dir="ltr">{{ service.link }}</code></div>
+  <button class="btn" type="button" data-copy="{{ service.link }}">کپی لینک</button>
+  <div class="qr">{{ service.qr | safe }}</div>
+</section>
+{% endif %}
+
+{# ---------- buy ---------- #}
+<section class="card">
+  <h2>{{ "افزایش حجم" if service else "خرید" }}</h2>
+
+  {% if pending %}
+    <div class="flash warn">⏳ سفارش شما در انتظار تأیید است. بعد از تأیید، حجم به همین پنل اضافه می‌شود.</div>
+  {% else %}
+  <form method="post" action="/order" enctype="multipart/form-data" class="stack" id="buy" data-price="{{ price }}">
+    <div>
+      <div class="label">چند KG؟</div>
+      <div class="chips">
+        {% for p in presets %}<button type="button" class="chip" data-gb="{{ p }}">{{ p | fa }} KG</button>{% endfor %}
+      </div>
+      <div class="qty">
+        <button type="button" class="step" data-step="-1" aria-label="کم">−</button>
+        <input name="gb" id="gb" type="number" inputmode="numeric" min="{{ min_gb }}" max="{{ max_gb }}" value="{{ presets[0] if presets else 1 }}" required dir="ltr">
+        <button type="button" class="step" data-step="1" aria-label="زیاد">+</button>
+      </div>
+    </div>
+
+    <div class="total">
+      <span>مبلغ قابل پرداخت</span>
+      <b><span id="total">{{ ((presets[0] if presets else 1) * price) | fa }}</span> تومان</b>
+      <span class="small muted">هر KG {{ price | fa }} تومان</span>
+    </div>
+
+    <div class="paybox">
+      ۱. برای دریافت اطلاعات پرداخت{% if telegram %} به <a href="https://t.me/{{ telegram }}" dir="ltr">@{{ telegram }}</a> در تلگرام{% endif %} پیام دهید.<br>
+      ۲. مبلغ را پرداخت کنید و تصویر رسید را این‌جا بارگذاری کنید.
+    </div>
+
+    <label class="file">تصویر رسید پرداخت
+      <input name="receipt" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" required>
+    </label>
+    <button class="btn" type="submit">ارسال رسید</button>
+  </form>
+  {% endif %}
+</section>
+
+{# ---------- orders ---------- #}
+{% if orders %}
+<section class="card">
+  <h2>سفارش‌های من</h2>
+  {% for o in orders %}
+  <div class="order">
+    <div>
+      <b>{{ o.gb | fa }} KG</b> <span class="muted small">— {{ o.amount | fa }} تومان</span>
+      {% if o.note %}<div class="small muted">{{ o.note }}</div>{% endif %}
+    </div>
+    <span class="badge {{ st[o.status][1] }}">{{ st[o.status][0] }}</span>
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+{% endblock %}

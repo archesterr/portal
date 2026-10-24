@@ -1,4 +1,3 @@
-import hashlib
 import hmac
 import io
 import json
@@ -20,45 +19,47 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import db, kyc, notify, sms
+from . import db, notify
 from .panel import Panel, PanelError
+from .util import check_pw, digits, fa, hash_pw, norm_phone, sniff_file, valid_email
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-log = logging.getLogger("portal")
+log = logging.getLogger("shop")
 
 # ---------- config ----------
 SECRET = os.environ["SECRET_KEY"]
-BRAND = os.getenv("BRAND_NAME", "پرتال")
-SUPPORT = os.getenv("SUPPORT_CONTACT", "")
-ADMIN_PHONES = {kyc.norm_phone(p) for p in os.getenv("ADMIN_PHONES", "").split(",") if kyc.norm_phone(p)}
+ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
+BRAND = os.getenv("BRAND_NAME", "فروشگاه")
+TELEGRAM = os.getenv("SUPPORT_TELEGRAM", "").lstrip("@")
+PRICE = int(os.getenv("PRICE_PER_GB", "800000"))          # toman per KG
+MIN_GB, MAX_GB = int(os.getenv("MIN_GB", "1")), int(os.getenv("MAX_GB", "200"))
+PRESETS = [int(x) for x in os.getenv("GB_PRESETS", "1,2,5,10,20,50").split(",") if x.strip()]
+INBOUNDS = [int(x) for x in os.getenv("INBOUND_IDS", "1").split(",") if x.strip()]
+SERVICE_DAYS = int(os.getenv("SERVICE_DAYS", "0"))        # 0 = volume only
+IP_LIMIT = int(os.getenv("IP_LIMIT", "0"))
 SUB_BASE = os.getenv("SUB_BASE_URL", "").rstrip("/")
-EMAIL_PREFIX = os.getenv("CLIENT_EMAIL_PREFIX", "p")
-AUTO_APPROVE = os.getenv("AUTO_APPROVE_REQUESTS", "false").lower() == "true"
-START_ON_FIRST_USE = os.getenv("START_ON_FIRST_USE", "true").lower() == "true"
-KYC_PURGE = os.getenv("KYC_PURGE_AFTER_REVIEW", "true").lower() == "true"
-MAX_ACTIVE = int(os.getenv("MAX_ACTIVE_PER_USER", "1"))
+EMAIL_PREFIX = os.getenv("CLIENT_EMAIL_PREFIX", "u")
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").lower() == "true"
 DATA = Path(os.getenv("DATA_DIR", "/data"))
-KYC_DIR = DATA / "kyc"
-MAX_UPLOAD = 5 * 1024 * 1024
-OTP_TTL, OTP_COOLDOWN, OTP_MAX_TRIES = 120, 60, 5
-PLANS = {p["id"]: p for p in json.loads(Path(os.getenv("PLANS_FILE", "/app/plans.json")).read_text("utf-8"))}
+RECEIPTS = DATA / "receipts"
+MAX_UPLOAD = 8 * 1024 * 1024
 
 panel = Panel()
 BASE = Path(__file__).parent
 tpl = Jinja2Templates(directory=BASE / "templates")
+tpl.env.filters["fa"] = fa
 
 
 @asynccontextmanager
 async def lifespan(_):
-    KYC_DIR.mkdir(parents=True, exist_ok=True)
+    RECEIPTS.mkdir(parents=True, exist_ok=True)
     db.init()
     yield
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(SessionMiddleware, secret_key=SECRET, session_cookie="sid",
-                   max_age=7 * 86400, same_site="lax", https_only=COOKIE_SECURE)
+                   max_age=30 * 86400, same_site="lax", https_only=COOKIE_SECURE)
 app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 
 
@@ -106,20 +107,14 @@ def current_user(req):
 def need_user(req):
     u = current_user(req)
     if not u:
-        req.session.clear()
+        req.session.pop("uid", None)
         raise Redirect("/login")
     return u
 
 
-def is_admin(u):
-    return bool(u) and u["phone"] in ADMIN_PHONES
-
-
 def need_admin(req):
-    u = need_user(req)
-    if not is_admin(u):
-        raise HTTPException(404)
-    return u
+    if not req.session.get("admin"):
+        raise Redirect("/admin/login")
 
 
 def audit(actor, action, target):
@@ -130,21 +125,17 @@ def audit(actor, action, target):
 
 def render(req, name, **ctx):
     ctx.setdefault("user", current_user(req))
-    ctx.update(brand=BRAND, support=SUPPORT, flash=req.session.pop("flash", None),
-               admin=is_admin(ctx["user"]))
+    ctx.update(brand=BRAND, telegram=TELEGRAM, flash=req.session.pop("flash", None),
+               is_admin=bool(req.session.get("admin")))
     return tpl.TemplateResponse(req, name, ctx)
 
 
-def otp_hash(phone, code):
-    return hmac.new(SECRET.encode(), f"{phone}:{code}".encode(), hashlib.sha256).hexdigest()
+_hits: dict = defaultdict(deque)
 
 
-_ip_hits: dict = defaultdict(deque)
-
-
-def ip_allowed(req, limit=5, window=600):
+def rate_ok(req, key, limit, window):
     ip = req.client.host if req.client else "?"
-    q, now = _ip_hits[ip], time.time()
+    q, now = _hits[(key, ip)], time.time()
     while q and q[0] < now - window:
         q.popleft()
     if len(q) >= limit:
@@ -161,38 +152,38 @@ def qr_svg(text):
     return s[s.find("<svg"):]
 
 
-def fmt_usage(u):
-    gb = lambda b: f"{b / 1024 ** 3:.1f}"
-    exp = u["expiry"]
-    if exp < 0:
-        e = f"{-exp // 86_400_000} روز، از اولین استفاده"
-    elif exp == 0:
-        e = "بدون محدودیت زمانی"
-    else:
-        left = (exp / 1000 - time.time()) / 86400
-        e = f"{int(left)} روز باقی‌مانده" if left > 0 else "منقضی شده"
-    return {"used": gb(u["used"]), "total": gb(u["total"]) if u["total"] else "∞", "expiry": e,
-            "pct": min(100, int(100 * u["used"] / u["total"])) if u["total"] else 0}
+def gb_str(b):
+    v = b / 1024 ** 3
+    return fa(f"{v:.2f}".rstrip("0").rstrip("."))
 
 
-def provision(rid):
+def login_as(req, uid):
+    admin = req.session.get("admin")
+    req.session.clear()
+    req.session["uid"] = uid
+    if admin:
+        req.session["admin"] = True
+
+
+def deliver(order):
+    """Create the customer's service, or top up the existing one."""
     with db.conn() as c:
-        r = c.execute("SELECT * FROM requests WHERE id=? AND status='pending'", (rid,)).fetchone()
-    if not r:
-        raise ValueError("request is not pending")
-    plan = PLANS[r["plan_id"]]
+        svc = c.execute("SELECT * FROM services WHERE user_id=?", (order["user_id"],)).fetchone()
+    now = int(time.time())
+    if svc and svc["status"] == "active":
+        panel.topup(json.loads(svc["clients"]), order["gb"])
+        with db.conn() as c:
+            c.execute("UPDATE services SET total_gb=total_gb+? WHERE user_id=?", (order["gb"], order["user_id"]))
+        return
     sub_id, cid = secrets.token_hex(8), str(uuid.uuid4())
-    clients = panel.add_clients(plan["inbounds"], sub_id, cid, f"{EMAIL_PREFIX}{r['user_id']}-{rid}",
-                                plan["gb"], plan["days"], plan.get("ip_limit", 0), START_ON_FIRST_USE)
+    clients = panel.add_clients(INBOUNDS, sub_id, cid, f"{EMAIL_PREFIX}{order['user_id']}-{order['id']}",
+                                order["gb"], SERVICE_DAYS, IP_LIMIT, True)
     with db.conn() as c:
-        c.execute("UPDATE requests SET status='active',sub_id=?,client_uuid=?,clients=?,decided_at=? WHERE id=?",
-                  (sub_id, cid, json.dumps(clients), int(time.time()), rid))
-
-
-def purge_docs(u):
-    for f in (u["id_doc"], u["selfie"]):
-        if f:
-            (KYC_DIR / f).unlink(missing_ok=True)
+        c.execute("INSERT INTO services(user_id,sub_id,client_uuid,clients,total_gb,status,created_at) "
+                  "VALUES(?,?,?,?,?,'active',?) ON CONFLICT(user_id) DO UPDATE SET sub_id=excluded.sub_id, "
+                  "client_uuid=excluded.client_uuid, clients=excluded.clients, total_gb=excluded.total_gb, "
+                  "status='active', created_at=excluded.created_at",
+                  (order["user_id"], sub_id, cid, json.dumps(clients), order["gb"], now))
 
 
 # ---------- public ----------
@@ -203,73 +194,58 @@ def healthz():
 
 @app.get("/")
 def index(req: Request):
-    return RedirectResponse("/dashboard" if req.session.get("uid") else "/login", 303)
+    return RedirectResponse("/panel" if req.session.get("uid") else "/register", 303)
+
+
+@app.get("/register")
+def register_page(req: Request):
+    if req.session.get("uid"):
+        raise Redirect("/panel")
+    return render(req, "register.html")
+
+
+@app.post("/register")
+def register(req: Request, name: str = Form(...), phone: str = Form(...),
+             email: str = Form(""), password: str = Form(...)):
+    name, p, email = " ".join(name.split()), norm_phone(phone), email.strip().lower()
+    if not 2 <= len(name) <= 60:
+        fail(req, "نام را وارد کنید.", "/register")
+    if not p:
+        fail(req, "شماره موبایل معتبر نیست (مثل 09121234567).", "/register")
+    if email and not valid_email(email):
+        fail(req, "ایمیل معتبر نیست.", "/register")
+    if not 6 <= len(password) <= 128:
+        fail(req, "رمز عبور حداقل ۶ کاراکتر باشد.", "/register")
+    if not rate_ok(req, "register", 5, 3600):
+        fail(req, "تعداد تلاش زیاد است. کمی بعد دوباره امتحان کنید.", "/register")
+    with db.conn() as c:
+        if c.execute("SELECT 1 FROM users WHERE phone=?", (p,)).fetchone():
+            fail(req, "این شماره قبلاً ثبت شده است. وارد شوید.", "/login")
+        uid = c.execute("INSERT INTO users(name,phone,email,pw_hash,created_at) VALUES(?,?,?,?,?)",
+                        (name, p, email or None, hash_pw(password), int(time.time()))).lastrowid
+    login_as(req, uid)
+    flash(req, f"خوش آمدید {name} 👋")
+    raise Redirect("/panel")
 
 
 @app.get("/login")
 def login_page(req: Request):
     if req.session.get("uid"):
-        raise Redirect("/dashboard")
+        raise Redirect("/panel")
     return render(req, "login.html")
 
 
 @app.post("/login")
-def login(req: Request, phone: str = Form(...)):
-    p = kyc.norm_phone(phone)
-    if not p:
-        fail(req, "شماره موبایل معتبر نیست.", "/login")
-    now = int(time.time())
+def login(req: Request, phone: str = Form(...), password: str = Form(...)):
+    if not rate_ok(req, "login", 10, 600):
+        fail(req, "تعداد تلاش زیاد است. چند دقیقه بعد امتحان کنید.", "/login")
+    p = norm_phone(phone)
     with db.conn() as c:
-        row = c.execute("SELECT last_sent FROM otps WHERE phone=?", (p,)).fetchone()
-    if row and now - row["last_sent"] < OTP_COOLDOWN:
-        req.session["otp_phone"] = p
-        fail(req, f"کد قبلاً ارسال شده. {OTP_COOLDOWN - (now - row['last_sent'])} ثانیه دیگر دوباره تلاش کنید.", "/verify")
-    if not ip_allowed(req):
-        fail(req, "تعداد درخواست‌ها زیاد است. چند دقیقه بعد تلاش کنید.", "/login")
-    code = f"{secrets.randbelow(10 ** 6):06d}"
-    with db.conn() as c:
-        c.execute("INSERT INTO otps(phone,code_hash,expires_at,attempts,last_sent) VALUES(?,?,?,0,?) "
-                  "ON CONFLICT(phone) DO UPDATE SET code_hash=excluded.code_hash, "
-                  "expires_at=excluded.expires_at, attempts=0, last_sent=excluded.last_sent",
-                  (p, otp_hash(p, code), now + OTP_TTL, now))
-    try:
-        sms.send_otp(p, code)
-    except Exception:
-        log.exception("sms send failed")
-        fail(req, "ارسال پیامک ناموفق بود. کمی بعد تلاش کنید.", "/login")
-    req.session["otp_phone"] = p
-    raise Redirect("/verify")
-
-
-@app.get("/verify")
-def verify_page(req: Request):
-    p = req.session.get("otp_phone")
-    if not p:
-        raise Redirect("/login")
-    return render(req, "verify.html", phone=p)
-
-
-@app.post("/verify")
-def verify(req: Request, code: str = Form(...)):
-    p = req.session.get("otp_phone")
-    if not p:
-        raise Redirect("/login")
-    code, now, uid = kyc.digits(code), int(time.time()), None
-    with db.conn() as c:
-        row = c.execute("SELECT * FROM otps WHERE phone=?", (p,)).fetchone()
-        ok = bool(row) and row["expires_at"] > now and row["attempts"] < OTP_MAX_TRIES \
-            and hmac.compare_digest(row["code_hash"], otp_hash(p, code))
-        if ok:
-            c.execute("DELETE FROM otps WHERE phone=?", (p,))
-            c.execute("INSERT OR IGNORE INTO users(phone,created_at) VALUES(?,?)", (p, now))
-            uid = c.execute("SELECT id FROM users WHERE phone=?", (p,)).fetchone()["id"]
-        elif row:
-            c.execute("UPDATE otps SET attempts=attempts+1 WHERE phone=?", (p,))
-    if not ok:
-        fail(req, "کد نادرست یا منقضی شده است.", "/verify")
-    req.session.clear()
-    req.session["uid"] = uid
-    raise Redirect("/admin" if p in ADMIN_PHONES else "/dashboard")
+        u = c.execute("SELECT * FROM users WHERE phone=?", (p,)).fetchone() if p else None
+    if not u or not check_pw(password, u["pw_hash"]):
+        fail(req, "شماره یا رمز عبور اشتباه است.", "/login")
+    login_as(req, u["id"])
+    raise Redirect("/panel")
 
 
 @app.post("/logout")
@@ -279,169 +255,153 @@ def logout(req: Request):
 
 
 # ---------- customer ----------
-@app.get("/dashboard")
-def dashboard(req: Request):
+@app.get("/panel")
+def customer_panel(req: Request):
     u = need_user(req)
     with db.conn() as c:
-        rows = c.execute("SELECT * FROM requests WHERE user_id=? ORDER BY id DESC", (u["id"],)).fetchall()
-    items, open_count = [], 0
-    for r in rows:
-        d = dict(r)
-        d["plan"] = PLANS.get(r["plan_id"], {"title": r["plan_id"]})
-        if r["status"] in ("pending", "active"):
-            open_count += 1
-        if r["status"] == "active":
-            d["link"] = f"{SUB_BASE}/{r['sub_id']}"
-            d["qr"] = qr_svg(d["link"])
-            try:
-                d["usage"] = fmt_usage(panel.usage(json.loads(r["clients"])))
-            except Exception as e:
-                log.warning("usage fetch failed: %s", e)
-                d["usage"] = None
-        items.append(d)
-    can_request = u["kyc_status"] == "approved" and open_count < MAX_ACTIVE
-    return render(req, "dashboard.html", user=u, items=items, plans=list(PLANS.values()),
-                  can_request=can_request)
-
-
-@app.post("/kyc")
-def submit_kyc(req: Request, full_name: str = Form(...), national_code: str = Form(...),
-               id_doc: UploadFile = File(...), selfie: UploadFile = File(...)):
-    u = need_user(req)
-    if u["kyc_status"] not in ("none", "rejected"):
-        raise Redirect("/dashboard")
-    name, nc = " ".join(full_name.split()), kyc.digits(national_code)
-    if not 3 <= len(name) <= 80:
-        fail(req, "نام و نام خانوادگی را کامل وارد کنید.", "/dashboard")
-    if not kyc.valid_national_code(nc):
-        fail(req, "کد ملی معتبر نیست.", "/dashboard")
-    with db.conn() as c:
-        if c.execute("SELECT 1 FROM users WHERE national_code=? AND id!=?", (nc, u["id"])).fetchone():
-            fail(req, "این کد ملی قبلاً با شماره دیگری ثبت شده است.", "/dashboard")
-    if kyc.shahkar_check(u["phone"], nc) is False:
-        fail(req, "شماره موبایل به نام این کد ملی ثبت نشده است.", "/dashboard")
-
-    saved = []
-    for f in (id_doc, selfie):
-        b = f.file.read(MAX_UPLOAD + 1)
-        ext = kyc.sniff_image(b)
-        if len(b) > MAX_UPLOAD or not ext:
-            for s in saved:
-                (KYC_DIR / s).unlink(missing_ok=True)
-            fail(req, "تصویر باید JPG/PNG/WEBP و کمتر از ۵ مگابایت باشد.", "/dashboard")
-        fn = f"{secrets.token_hex(16)}.{ext}"
-        (KYC_DIR / fn).write_bytes(b)
-        saved.append(fn)
-
-    purge_docs(u)  # leftovers from a rejected attempt
-    with db.conn() as c:
-        c.execute("UPDATE users SET full_name=?,national_code=?,id_doc=?,selfie=?,"
-                  "kyc_status='submitted',kyc_note=NULL WHERE id=?", (name, nc, saved[0], saved[1], u["id"]))
-    notify.admin(f"🪪 احراز هویت جدید: {name} — {u['phone']}")
-    flash(req, "مدارک ثبت شد. پس از بررسی، نتیجه همین‌جا نمایش داده می‌شود.")
-    raise Redirect("/dashboard")
-
-
-@app.post("/request")
-def new_request(req: Request, plan_id: str = Form(...)):
-    u = need_user(req)
-    if u["kyc_status"] != "approved":
-        fail(req, "ابتدا احراز هویت را کامل کنید.", "/dashboard")
-    if plan_id not in PLANS:
-        fail(req, "سرویس انتخاب‌شده معتبر نیست.", "/dashboard")
-    with db.conn() as c:
-        n = c.execute("SELECT COUNT(*) FROM requests WHERE user_id=? AND status IN ('pending','active')",
-                      (u["id"],)).fetchone()[0]
-        if n < MAX_ACTIVE:
-            rid = c.execute("INSERT INTO requests(user_id,plan_id,created_at) VALUES(?,?,?)",
-                            (u["id"], plan_id, int(time.time()))).lastrowid
-    if n >= MAX_ACTIVE:
-        fail(req, "شما یک سرویس فعال یا در انتظار دارید.", "/dashboard")
-    if AUTO_APPROVE:
+        svc = c.execute("SELECT * FROM services WHERE user_id=?", (u["id"],)).fetchone()
+        orders = c.execute("SELECT * FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 20", (u["id"],)).fetchall()
+    service = None
+    if svc and svc["status"] == "active":
+        link = f"{SUB_BASE}/{svc['sub_id']}"
+        service = {"link": link, "qr": qr_svg(link), "total": fa(svc["total_gb"]), "used": None, "pct": 0}
         try:
-            provision(rid)
-            audit("auto", "provision", rid)
-            flash(req, "سرویس شما فعال شد ✓")
-            raise Redirect("/dashboard")
-        except (PanelError, ValueError, KeyError) as e:
-            log.error("auto provision failed: %s", e)
-    notify.admin(f"📥 درخواست جدید #{rid}: {PLANS[plan_id]['title']} — {u['phone']}")
-    flash(req, "درخواست ثبت شد و به‌زودی فعال می‌شود.")
-    raise Redirect("/dashboard")
+            us = panel.usage(json.loads(svc["clients"]))
+            total = us["total"] or svc["total_gb"] * 1024 ** 3
+            service.update(used=gb_str(us["used"]), total=gb_str(total),
+                           left=gb_str(max(0, total - us["used"])),
+                           pct=min(100, int(100 * us["used"] / total)) if total else 0)
+        except Exception as e:
+            log.warning("usage fetch failed: %s", e)
+    pending = any(o["status"] == "pending" for o in orders)
+    return render(req, "panel.html", user=u, service=service, orders=orders, pending=pending,
+                  price=PRICE, presets=PRESETS, min_gb=MIN_GB, max_gb=MAX_GB)
+
+
+@app.post("/order")
+def new_order(req: Request, gb: str = Form(...), receipt: UploadFile = File(...)):
+    u = need_user(req)
+    try:
+        n = int(digits(gb))
+    except ValueError:
+        n = 0
+    if not MIN_GB <= n <= MAX_GB:
+        fail(req, f"مقدار باید بین {fa(MIN_GB)} تا {fa(MAX_GB)} KG باشد.", "/panel")
+    with db.conn() as c:
+        if c.execute("SELECT 1 FROM orders WHERE user_id=? AND status='pending'", (u["id"],)).fetchone():
+            fail(req, "یک سفارش در انتظار تأیید دارید.", "/panel")
+    b = receipt.file.read(MAX_UPLOAD + 1)
+    ext = sniff_file(b)
+    if len(b) > MAX_UPLOAD or not ext:
+        fail(req, "رسید باید عکس (JPG/PNG) یا PDF و کمتر از ۸ مگابایت باشد.", "/panel")
+    fn = f"{secrets.token_hex(16)}.{ext}"
+    (RECEIPTS / fn).write_bytes(b)
+    amount = n * PRICE
+    with db.conn() as c:
+        oid = c.execute("INSERT INTO orders(user_id,gb,amount,receipt,created_at) VALUES(?,?,?,?,?)",
+                        (u["id"], n, amount, fn, int(time.time()))).lastrowid
+    notify.admin(f"🧾 سفارش #{oid}: {n} KG — {amount:,} تومان\n{u['name']} — {u['phone']}")
+    flash(req, "رسید ثبت شد ✓ پس از تأیید، حجم به پنل شما اضافه می‌شود.")
+    raise Redirect("/panel")
 
 
 # ---------- admin ----------
-@app.get("/admin")
-def admin_home(req: Request):
-    a = need_admin(req)
-    q = "SELECT r.*, u.phone, u.full_name FROM requests r JOIN users u ON u.id=r.user_id WHERE r.status=? ORDER BY r.id {} LIMIT 300"
-    with db.conn() as c:
-        kycs = c.execute("SELECT * FROM users WHERE kyc_status='submitted' ORDER BY id").fetchall()
-        pending = c.execute(q.format("ASC"), ("pending",)).fetchall()
-        active = c.execute(q.format("DESC"), ("active",)).fetchall()
-        stats = c.execute("SELECT (SELECT COUNT(*) FROM users) users, "
-                          "(SELECT COUNT(*) FROM users WHERE kyc_status='approved') verified, "
-                          "(SELECT COUNT(*) FROM requests WHERE status='active') active").fetchone()
-    title = lambda pid: PLANS.get(pid, {}).get("title", pid)
-    return render(req, "admin.html", user=a, kycs=kycs, pending=pending, active=active,
-                  stats=stats, plan_title=title)
+@app.get("/admin/login")
+def admin_login_page(req: Request):
+    return render(req, "admin_login.html", user=None)
 
 
-@app.get("/admin/file/{name}")
-def admin_file(req: Request, name: str):
-    need_admin(req)
-    if not re.fullmatch(r"[0-9a-f]{32}\.(jpg|png|webp)", name) or not (KYC_DIR / name).exists():
-        raise HTTPException(404)
-    return FileResponse(KYC_DIR / name, headers={"Cache-Control": "no-store"})
-
-
-@app.post("/admin/kyc/{uid}")
-def admin_kyc(req: Request, uid: int, action: str = Form(...), note: str = Form("")):
-    a = need_admin(req)
-    status = {"approve": "approved", "reject": "rejected"}.get(action)
-    if not status:
-        raise HTTPException(400)
-    with db.conn() as c:
-        u = c.execute("SELECT * FROM users WHERE id=? AND kyc_status='submitted'", (uid,)).fetchone()
-        if u:
-            c.execute("UPDATE users SET kyc_status=?, kyc_note=? WHERE id=?",
-                      (status, note.strip()[:200] or None, uid))
-            if KYC_PURGE:
-                c.execute("UPDATE users SET id_doc=NULL, selfie=NULL WHERE id=?", (uid,))
-    if u:
-        if KYC_PURGE:
-            purge_docs(u)
-        audit(a["phone"], f"kyc_{status}", uid)
-        flash(req, f"احراز هویت {u['full_name']}: {'تأیید' if status == 'approved' else 'رد'} شد.")
+@app.post("/admin/login")
+def admin_login(req: Request, password: str = Form(...)):
+    if not rate_ok(req, "admin", 5, 900) or not hmac.compare_digest(password.encode(), ADMIN_PASSWORD.encode()):
+        time.sleep(1)
+        fail(req, "رمز اشتباه است.", "/admin/login")
+    req.session["admin"] = True
     raise Redirect("/admin")
 
 
-@app.post("/admin/request/{rid}")
-def admin_request(req: Request, rid: int, action: str = Form(...), note: str = Form("")):
-    a = need_admin(req)
+@app.post("/admin/logout")
+def admin_logout(req: Request):
+    req.session.pop("admin", None)
+    raise Redirect("/admin/login")
+
+
+@app.get("/admin")
+def admin_home(req: Request):
+    need_admin(req)
+    with db.conn() as c:
+        pending = c.execute("SELECT o.*, u.name, u.phone, u.email, s.status AS svc FROM orders o "
+                            "JOIN users u ON u.id=o.user_id LEFT JOIN services s ON s.user_id=o.user_id "
+                            "WHERE o.status='pending' ORDER BY o.id").fetchall()
+        recent = c.execute("SELECT o.*, u.name, u.phone FROM orders o JOIN users u ON u.id=o.user_id "
+                           "WHERE o.status!='pending' ORDER BY o.decided_at DESC LIMIT 30").fetchall()
+        customers = c.execute("SELECT u.*, s.total_gb, s.status AS svc, s.sub_id FROM users u "
+                              "LEFT JOIN services s ON s.user_id=u.id ORDER BY u.id DESC LIMIT 300").fetchall()
+        stats = c.execute("SELECT (SELECT COUNT(*) FROM users) users, "
+                          "(SELECT COUNT(*) FROM services WHERE status='active') active, "
+                          "(SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='approved') revenue").fetchone()
+    return render(req, "admin.html", user=None, pending=pending, recent=recent,
+                  customers=customers, stats=stats, sub_base=SUB_BASE)
+
+
+@app.get("/admin/receipt/{name}")
+def admin_receipt(req: Request, name: str):
+    need_admin(req)
+    if not re.fullmatch(r"[0-9a-f]{32}\.(jpg|png|webp|pdf)", name) or not (RECEIPTS / name).exists():
+        raise HTTPException(404)
+    return FileResponse(RECEIPTS / name, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/admin/order/{oid}")
+def admin_order(req: Request, oid: int, action: str = Form(...), note: str = Form("")):
+    need_admin(req)
+    with db.conn() as c:
+        o = c.execute("SELECT * FROM orders WHERE id=? AND status='pending'", (oid,)).fetchone()
+    if not o:
+        fail(req, "سفارش پیدا نشد یا قبلاً بررسی شده.", "/admin")
     if action == "approve":
         try:
-            provision(rid)
-        except (PanelError, ValueError, KeyError) as e:
-            fail(req, f"فعال‌سازی ناموفق: {e}", "/admin")
-        flash(req, f"درخواست #{rid} فعال شد.")
+            deliver(o)
+        except PanelError as e:
+            fail(req, f"ارسال به پنل ناموفق: {e}", "/admin")
+        status = "approved"
+        flash(req, f"سفارش #{oid} تأیید شد و {o['gb']} KG اضافه شد.")
     elif action == "reject":
-        with db.conn() as c:
-            c.execute("UPDATE requests SET status='rejected', note=?, decided_at=? WHERE id=? AND status='pending'",
-                      (note.strip()[:200] or None, int(time.time()), rid))
-        flash(req, f"درخواست #{rid} رد شد.")
-    elif action == "revoke":
-        with db.conn() as c:
-            r = c.execute("SELECT * FROM requests WHERE id=? AND status='active'", (rid,)).fetchone()
-        if r:
-            try:
-                panel.remove(json.loads(r["clients"]))
-            except PanelError as e:
-                fail(req, f"غیرفعال‌سازی ناموفق: {e}", "/admin")
-            with db.conn() as c:
-                c.execute("UPDATE requests SET status='revoked', decided_at=? WHERE id=?", (int(time.time()), rid))
-        flash(req, f"سرویس #{rid} غیرفعال شد.")
+        status = "rejected"
+        flash(req, f"سفارش #{oid} رد شد.")
     else:
         raise HTTPException(400)
-    audit(a["phone"], f"request_{action}", rid)
+    with db.conn() as c:
+        c.execute("UPDATE orders SET status=?, note=?, decided_at=? WHERE id=?",
+                  (status, note.strip()[:200] or None, int(time.time()), oid))
+    audit("admin", f"order_{status}", oid)
+    raise Redirect("/admin")
+
+
+@app.post("/admin/user/{uid}/revoke")
+def admin_revoke(req: Request, uid: int):
+    need_admin(req)
+    with db.conn() as c:
+        s = c.execute("SELECT * FROM services WHERE user_id=? AND status='active'", (uid,)).fetchone()
+    if s:
+        try:
+            panel.remove(json.loads(s["clients"]))
+        except PanelError as e:
+            fail(req, f"غیرفعال‌سازی ناموفق: {e}", "/admin")
+        with db.conn() as c:
+            c.execute("UPDATE services SET status='revoked' WHERE user_id=?", (uid,))
+        audit("admin", "revoke", uid)
+        flash(req, "سرویس غیرفعال شد.")
+    raise Redirect("/admin")
+
+
+@app.post("/admin/user/{uid}/reset")
+def admin_reset(req: Request, uid: int):
+    need_admin(req)
+    pw = secrets.token_urlsafe(6)
+    with db.conn() as c:
+        n = c.execute("UPDATE users SET pw_hash=? WHERE id=?", (hash_pw(pw), uid)).rowcount
+    if n:
+        audit("admin", "reset_pw", uid)
+        flash(req, f"رمز جدید کاربر #{uid}: {pw}")
     raise Redirect("/admin")

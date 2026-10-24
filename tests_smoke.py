@@ -1,51 +1,76 @@
-import os, re, sys, io, logging
-S="/tmp/portal-smoke"
-import shutil; shutil.rmtree(S, ignore_errors=True); os.makedirs(S)
-os.environ.update(SECRET_KEY="x"*32, ADMIN_PHONES="09120000000", SUB_BASE_URL="https://sub.t/sub",
-  DATA_DIR=S, DB_PATH=S+"/p.db", PLANS_FILE="plans.json", COOKIE_SECURE="false")
-sys.path.insert(0,".")
-from app import main, sms
-codes={}
-sms.send_otp=lambda p,c: codes.__setitem__(p,c)
-calls=[]
-class Fake:
-    def add_clients(self,*a): calls.append(("add",a)); return [[1,"p1-1-1"]]
-    def remove(self,c): calls.append(("rm",c))
-    def usage(self,c): return {"used":5*1024**3,"total":50*1024**3,"expiry":-30*86400000}
-main.panel=Fake()
-from fastapi.testclient import TestClient
-JPG=b"\xff\xd8\xff\xe0"+b"0"*100
-def login(cl,phone):
-    r=cl.post("/login",data={"phone":phone}); assert r.status_code==200 and "کد تأیید" in r.text, r.text[:300]
-    p=main.kyc.norm_phone(phone)
-    r=cl.post("/verify",data={"code":"000000" if codes[p]!="000000" else "111111"}); assert "نادرست" in r.text
-    r=cl.post("/verify",data={"code":codes[p]}); return r
+"""End-to-end smoke test against a fake panel.  pip install -r requirements.txt && python tests_smoke.py"""
+import os
+import re
+import shutil
+import sys
+
+S = "/tmp/shop-smoke"
+shutil.rmtree(S, ignore_errors=True)
+os.makedirs(S)
+os.environ.update(SECRET_KEY="x" * 32, ADMIN_PASSWORD="adminpw", SUB_BASE_URL="https://sub.t/sub",
+                  DATA_DIR=S, DB_PATH=S + "/shop.db", COOKIE_SECURE="false", SUPPORT_TELEGRAM="@supp")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fastapi.testclient import TestClient  # noqa: E402
+
+from app import main  # noqa: E402
+
+calls = []
+
+
+class FakePanel:
+    def add_clients(self, *a):
+        calls.append("add")
+        return [[1, "u1-1-1"]]
+
+    def topup(self, clients, gb):
+        calls.append(f"topup{gb}")
+
+    def remove(self, c):
+        calls.append("rm")
+
+    def usage(self, c):
+        return {"used": 2 * 1024 ** 3, "total": 5 * 1024 ** 3, "expiry": 0}
+
+
+main.panel = FakePanel()
+JPG = b"\xff\xd8\xff\xe0" + b"0" * 100
+
 with TestClient(main.app) as u, TestClient(main.app) as a:
-    r=login(u,"+98 912 111 2233"); assert "احراز هویت" in r.text
-    r=u.post("/kyc",data={"full_name":"علی تست","national_code":"0000000001"},files={"id_doc":("a.jpg",JPG),"selfie":("b.jpg",JPG)}); assert "معتبر نیست" in r.text
-    r=u.post("/kyc",data={"full_name":"علی تست","national_code":"۰۰۱۲۳۴۵۶۷۸"},files={"id_doc":("a.jpg",b"notimg"),"selfie":("b.jpg",JPG)})
-    print("nc 0012345678 valid?", main.kyc.valid_national_code("0012345678"))
-    nc="0499370899"; assert main.kyc.valid_national_code(nc)
-    r=u.post("/kyc",data={"full_name":"علی تست","national_code":nc},files={"id_doc":("a.jpg",b"notimg"),"selfie":("b.jpg",JPG)}); assert "JPG" in r.text
-    r=u.post("/kyc",data={"full_name":"علی تست","national_code":nc},files={"id_doc":("a.jpg",JPG),"selfie":("b.jpg",JPG)}); assert "در حال بررسی" in r.text
-    assert u.get("/admin").status_code==404
-    r=login(a,"09120000000"); assert "احراز هویت در انتظار" in r.text and "علی تست" in r.text
-    img=re.search(r'/admin/file/([0-9a-f]{32}\.jpg)',r.text).group(1)
-    assert a.get("/admin/file/"+img).status_code==200 and u.get("/admin/file/"+img).status_code==404
-    uid=1
-    r=a.post(f"/admin/kyc/{uid}",data={"action":"approve"}); assert "تأیید شد" in r.text
-    assert not os.path.exists(f"{S}/kyc/{img}"), "purge failed"
-    r=u.get("/dashboard"); assert "دریافت سرویس" in r.text and "درخواست" in r.text
-    r=u.post("/request",data={"plan_id":"m1-50"}); assert "به‌زودی" in r.text
-    r=u.post("/request",data={"plan_id":"m1-50"}); assert "فعال یا در انتظار" in r.text
-    r=a.get("/admin"); assert "#1" in r.text
-    r=a.post("/admin/request/1",data={"action":"approve"}); assert "فعال شد" in r.text, r.text[-500:]
-    r=u.get("/dashboard"); assert "https://sub.t/sub/" in r.text and "<svg" in r.text and "5.0 از 50.0" in r.text
-    r=a.post("/admin/request/1",data={"action":"revoke"}); assert "غیرفعال شد" in r.text
-    r=u.get("/dashboard"); assert "غیرفعال" in r.text
-    print("headers:", {k:v for k,v in r.headers.items() if k.lower() in ("content-security-policy","server")})
-    low=r.text.lower()
-    for w in ["vless","vpn","xray","x-ui","proxy","v2ray","فیلتر","پروکسی","وی پی ان"]:
+    r = u.post("/register", data={"name": "علی", "phone": "۰۹۱۲۱۱۱۲۲۳۳", "password": "123"})
+    assert "۶ کاراکتر" in r.text
+    r = u.post("/register", data={"name": "علی", "phone": "09121112233", "email": "a@gmail.com", "password": "secret1"})
+    assert "خوش آمدید" in r.text and "خرید" in r.text, r.text[:400]
+    r = u.post("/register", data={"name": "x", "phone": "09121112233", "password": "secret1"})
+    u.post("/logout")
+    r = u.post("/login", data={"phone": "09121112233", "password": "bad"}); assert "اشتباه" in r.text
+    r = u.post("/login", data={"phone": "+989121112233", "password": "secret1"}); assert "سلام علی" in r.text
+
+    r = u.post("/order", data={"gb": "0"}, files={"receipt": ("r.jpg", JPG)}); assert "بین" in r.text
+    r = u.post("/order", data={"gb": "5"}, files={"receipt": ("r.txt", b"hello")}); assert "رسید باید" in r.text
+    r = u.post("/order", data={"gb": "۵"}, files={"receipt": ("r.jpg", JPG)}); assert "رسید ثبت شد" in r.text
+    assert "۴٬۰۰۰٬۰۰۰" in r.text  # 5 x 800,000
+    r = u.post("/order", data={"gb": "1"}, files={"receipt": ("r.jpg", JPG)}); assert "در انتظار" in r.text
+
+    assert "/admin/login" in str(a.get("/admin").url)
+    r = a.post("/admin/login", data={"password": "nope"}); assert "اشتباه" in r.text
+    r = a.post("/admin/login", data={"password": "adminpw"}); assert "سفارش‌های در انتظار" in r.text
+    rc = re.search(r"/admin/receipt/([0-9a-f]{32}\.jpg)", r.text).group(1)
+    assert a.get("/admin/receipt/" + rc).status_code == 200
+    assert u.get("/admin/receipt/" + rc, follow_redirects=False).status_code == 303
+    r = a.post("/admin/order/1", data={"action": "approve"}); assert "تأیید شد" in r.text
+    r = u.get("/panel"); assert "https://sub.t/sub/" in r.text and "<svg" in r.text and "۳ <small>KG باقی" in r.text
+
+    u.post("/order", data={"gb": "2"}, files={"receipt": ("r.pdf", b"%PDF-1.4 x")})
+    r = a.post("/admin/order/2", data={"action": "approve"}); assert "تأیید شد" in r.text
+    u.post("/order", data={"gb": "3"}, files={"receipt": ("r.png", b"\x89PNG\r\n\x1a\n000")})
+    r = a.post("/admin/order/3", data={"action": "reject", "note": "مبلغ کامل نیست"}); assert "رد شد" in r.text
+    r = u.get("/panel"); assert "مبلغ کامل نیست" in r.text
+    r = a.post("/admin/user/1/reset"); new_pw = re.search(r"رمز جدید کاربر #1: (\S+)<", r.text).group(1)
+    u.post("/logout"); r = u.post("/login", data={"phone": "09121112233", "password": new_pw}); assert "سلام" in r.text
+    r = a.post("/admin/user/1/revoke"); assert "غیرفعال شد" in r.text
+
+    low = (u.get("/panel").text + a.get("/admin").text).lower()
+    for w in ["vless", "vpn", "xray", "x-ui", "proxy", "v2ray", "پروکسی", "فیلترشکن", "وی پی ان"]:
         assert w not in low, w
-    print("calls:", [c[0] for c in calls])
+    assert calls == ["add", "topup2", "rm"], calls
 print("ALL OK")

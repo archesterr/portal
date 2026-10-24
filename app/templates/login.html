@@ -2,12 +2,16 @@
 {% block body %}
 <section class="card narrow">
   <h1>ورود</h1>
-  <p class="muted">شماره موبایل خود را وارد کنید تا کد تأیید برایتان پیامک شود.</p>
   <form method="post" action="/login" class="stack">
     <label>شماره موبایل
       <input name="phone" type="tel" inputmode="numeric" autocomplete="tel" placeholder="09xxxxxxxxx" dir="ltr" required autofocus>
     </label>
-    <button class="btn" type="submit">دریافت کد</button>
+    <label>رمز عبور
+      <input name="password" type="password" autocomplete="current-password" required dir="ltr">
+    </label>
+    <button class="btn" type="submit">ورود</button>
   </form>
+  <p class="center small">حساب ندارید؟ <a href="/register">ثبت‌نام</a></p>
+  {% if telegram %}<p class="center small muted">رمز را فراموش کرده‌اید؟ در تلگرام پیام دهید.</p>{% endif %}
 </section>
 {% endblock %}

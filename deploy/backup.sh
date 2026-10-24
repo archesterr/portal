@@ -3,5 +3,5 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p backups
-sqlite3 data/portal.db ".backup backups/portal-$(date +%F-%H).db"
-find backups -name 'portal-*.db' -mtime +7 -delete
+sqlite3 data/shop.db ".backup backups/shop-$(date +%F-%H).db"
+find backups -name 'shop-*.db' -mtime +7 -delete

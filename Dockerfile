@@ -4,7 +4,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
-COPY plans.json .
 RUN useradd -r -u 10001 portal && mkdir -p /data && chown portal /data
 USER portal
 EXPOSE 8000

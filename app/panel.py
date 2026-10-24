@@ -50,7 +50,12 @@ class Panel:
 
     def add_clients(self, inbounds, sub_id, cid, email_prefix, gb, days, ip_limit, start_on_first_use):
         """Add one client per inbound, all sharing sub_id -> one subscription link."""
-        exp = -days * 86_400_000 if start_on_first_use else int((time.time() + days * 86400) * 1000)
+        if not days:
+            exp = 0  # volume only, no time limit
+        elif start_on_first_use:
+            exp = -days * 86_400_000
+        else:
+            exp = int((time.time() + days * 86400) * 1000)
         added = []
         with self._session() as c:
             try:
@@ -74,6 +79,21 @@ class Panel:
                         pass
                 raise
         return added
+
+    def topup(self, clients, add_gb):
+        """Raise totalGB of existing clients by add_gb and re-enable them."""
+        with self._session() as c:
+            for inb, email in clients:
+                ib = self._ok(c.get(f"/panel/api/inbounds/get/{inb}")) or {}
+                settings = json.loads(ib.get("settings") or "{}")
+                cl = next((x for x in settings.get("clients", []) if x.get("email") == email), None)
+                if cl is None:
+                    raise PanelError(f"client {email} not found on inbound {inb}")
+                cl["totalGB"] = int(cl.get("totalGB", 0)) + int(add_gb * 1024 ** 3)
+                cl["enable"] = True
+                key = cl.get("id") or cl.get("password") or cl.get("auth") or email
+                self._ok(c.post(f"/panel/api/inbounds/updateClient/{key}",
+                                data={"id": str(inb), "settings": json.dumps({"clients": [cl]})}))
 
     def remove(self, clients):
         with self._session() as c:

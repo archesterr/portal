@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block body %}
+<section class="card narrow">
+  <h1>مدیریت</h1>
+  <form method="post" action="/admin/login" class="stack">
+    <label>رمز مدیریت
+      <input name="password" type="password" autocomplete="current-password" required autofocus dir="ltr">
+    </label>
+    <button class="btn" type="submit">ورود</button>
+  </form>
+</section>
+{% endblock %}

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block body %}
+<section class="card narrow">
+  <h1>ثبت‌نام</h1>
+  <p class="muted">یک‌بار ثبت‌نام کنید؛ بعد از آن خرید و پیگیری از همین‌جا.</p>
+  <form method="post" action="/register" class="stack">
+    <label>نام و نام خانوادگی
+      <input name="name" required maxlength="60" autocomplete="name" autofocus>
+    </label>
+    <label>شماره موبایل
+      <input name="phone" type="tel" inputmode="numeric" autocomplete="tel" placeholder="09xxxxxxxxx" dir="ltr" required>
+    </label>
+    <label>ایمیل <span class="opt">(اختیاری)</span>
+      <input name="email" type="email" autocomplete="email" placeholder="you@gmail.com" dir="ltr">
+    </label>
+    <label>رمز عبور
+      <input name="password" type="password" autocomplete="new-password" minlength="6" required dir="ltr">
+    </label>
+    <button class="btn" type="submit">ثبت‌نام</button>
+  </form>
+  <p class="center small">حساب دارید؟ <a href="/login">ورود</a></p>
+</section>
+{% endblock %}

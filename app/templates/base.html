@@ -11,18 +11,22 @@
 <body>
 <header class="top">
   <a href="/" class="brand"><span class="dot"></span>{{ brand }}</a>
-  {% if user %}
   <nav>
-    {% if admin %}<a href="/admin">مدیریت</a><a href="/dashboard">پنل من</a>{% endif %}
-    <form method="post" action="/logout"><button class="link">خروج</button></form>
+    {% if is_admin %}<a href="/admin">مدیریت</a>{% endif %}
+    {% if user %}
+      <form method="post" action="/logout"><button class="link">خروج</button></form>
+    {% elif is_admin %}
+      <form method="post" action="/admin/logout"><button class="link">خروج</button></form>
+    {% endif %}
   </nav>
-  {% endif %}
 </header>
 <main class="wrap">
   {% if flash %}<div class="flash {{ flash.k }}">{{ flash.m }}</div>{% endif %}
   {% block body %}{% endblock %}
 </main>
-{% if support %}<footer class="foot">پشتیبانی: {{ support }}</footer>{% endif %}
+{% if telegram %}
+<footer class="foot">پشتیبانی در تلگرام: <a href="https://t.me/{{ telegram }}" dir="ltr">@{{ telegram }}</a></footer>
+{% endif %}
 <script src="/static/app.js"></script>
 </body>
 </html>
