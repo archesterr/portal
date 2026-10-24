@@ -8,6 +8,9 @@ curl -fsS https://www.arvancloud.ir/en/ips.txt \
   | tr -d '\r' | grep -E '^[0-9a-fA-F:.]+/[0-9]+$' \
   | awk '{print "allow " $1 ";\nset_real_ip_from " $1 ";"}' > "$TMP"
 [ -s "$TMP" ] || { echo "empty IP list, keeping old $OUT" >&2; rm -f "$TMP"; exit 1; }
-install -m 644 "$TMP" "$OUT" && rm -f "$TMP"
-nginx -t -q && systemctl reload nginx
+command -v nginx >/dev/null || { echo "nginx not installed" >&2; rm -f "$TMP"; exit 1; }
+install -m 644 "$TMP" "$OUT"
+rm -f "$TMP"
+nginx -t -q
+systemctl reload nginx
 echo "$(grep -c '^allow' "$OUT") Arvan ranges loaded"
